@@ -203,7 +203,7 @@ body{font-family:"Barlow Condensed",sans-serif;background:#0b1a10;color:#fff;min
       <div class="step-num">3</div>
       <div class="step-body">
         <label>Prefixo URL das fotos (Google Drive)</label>
-        <input type="text" class="prefix-input" id="photo-prefix" value="https://drive.google.com/uc?export=view&id="/>
+        <input type="text" class="prefix-input" id="photo-prefix" value="https://lh3.googleusercontent.com/d/"/>
         <p>Não alterar — padrão correto para fotos públicas no Drive.</p>
       </div>
     </div>
@@ -243,7 +243,7 @@ const SVG_FLAG = '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><r
 
 let allData = [];
 let csvLoaded = false;
-let photoPrefix = "https://drive.google.com/uc?export=view&id=";
+let photoPrefix = "https://lh3.googleusercontent.com/d/";
 
 function initials(n){ return n.split(" ").slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
 
@@ -361,24 +361,39 @@ function renderGrid(data){
   });
 }
 
-// ── IMAGE CACHE (fetch as blob to bypass CORS) ───────────────────────────────
+// ── IMAGE CACHE ──────────────────────────────────────────────────────────────
 const imgCache = {};
 
-async function loadImgAsBase64(url) {
+// Load image as base64 — tries fetch first, falls back to Image element
+async function toBase64(url) {
   if(imgCache[url]) return imgCache[url];
   try {
-    const resp = await fetch(url);
+    const resp = await fetch(url, { mode: "cors", credentials: "omit" });
+    if(!resp.ok) throw new Error("fetch failed: " + resp.status);
     const blob = await resp.blob();
-    return new Promise((resolve) => {
+    return new Promise(resolve => {
       const reader = new FileReader();
-      reader.onloadend = () => {
-        imgCache[url] = reader.result;
-        resolve(reader.result);
-      };
+      reader.onloadend = () => { imgCache[url] = reader.result; resolve(reader.result); };
       reader.readAsDataURL(blob);
     });
   } catch(e) {
-    return null;
+    // Fallback: draw on canvas
+    return new Promise(resolve => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        const c = document.createElement("canvas");
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        c.getContext("2d").drawImage(img, 0, 0);
+        try {
+          const b64 = c.toDataURL("image/png");
+          imgCache[url] = b64;
+          resolve(b64);
+        } catch(e2) { resolve(null); }
+      };
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
   }
 }
 
@@ -389,7 +404,6 @@ function buildFig(p){
   el.dataset.nome = p.nome;
   el.dataset.fotoid = p.foto_id || "";
 
-  // Start with initials, load photo async
   const ini = initials(p.nome);
   el.innerHTML =
     '<div class="fig-bg"></div>' +
@@ -402,17 +416,25 @@ function buildFig(p){
     '<div class="fig-bottom"><div class="fig-dept">' + (p.departamento||"") + '</div></div>' +
     '<div class="fig-hover"><span>👆 Baixar</span></div>';
 
-  // Load photo async via fetch blob (bypasses CORS)
+  // Load photo — shows in card via img src directly (same as TV site)
   if(p.foto_id && p.foto_id.trim()) {
     const url = photoPrefix + p.foto_id.trim();
-    loadImgAsBase64(url).then(b64 => {
-      if(b64) {
-        const photoDiv = el.querySelector(".fig-photo");
-        if(photoDiv) {
-          photoDiv.innerHTML = '<img src="' + b64 + '" alt="' + p.nome + '" />';
-        }
-      }
-    });
+    const photoDiv = el.querySelector(".fig-photo");
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center top;display:block;";
+    img.onload = () => {
+      if(photoDiv) { photoDiv.innerHTML = ""; photoDiv.appendChild(img); }
+      // Cache as base64 for html2canvas
+      try {
+        const c = document.createElement("canvas");
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        c.getContext("2d").drawImage(img, 0, 0);
+        imgCache[url] = c.toDataURL("image/png");
+      } catch(e){}
+    };
+    img.onerror = () => {};
+    img.src = url;
   }
 
   el.onclick = () => downloadOne(el, p.nome);
@@ -423,15 +445,34 @@ function buildFig(p){
 async function downloadOne(el, nome){
   const hover = el.querySelector(".fig-hover");
   if(hover) hover.style.opacity = "0";
+
+  // Swap img src to cached base64 before capturing
+  const imgEl = el.querySelector(".fig-photo img");
+  const originalSrc = imgEl ? imgEl.src : null;
+  const fotoid = el.dataset.fotoid;
+
+  if(imgEl && fotoid) {
+    const url = photoPrefix + fotoid.trim();
+    const b64 = imgCache[url];
+    if(b64) imgEl.src = b64;
+  }
+
   try{
-    const canvas = await html2canvas(el, { scale:4, useCORS:false, allowTaint:true, backgroundColor:null, logging:false });
+    const canvas = await html2canvas(el, {
+      scale: 4,
+      useCORS: true,
+      allowTaint: false,
+      backgroundColor: null,
+      logging: false
+    });
     const link = document.createElement("a");
     link.download = nome.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/g,"") + ".png";
     link.href = canvas.toDataURL("image/png");
     link.click();
   } catch(e){
-    alert("Erro ao gerar PNG. Verifique se as fotos estão públicas no Drive.\n" + e.message);
+    alert("Erro ao gerar PNG.\n" + e.message);
   } finally {
+    if(imgEl && originalSrc) imgEl.src = originalSrc;
     if(hover) hover.style.opacity = "";
   }
 }
@@ -453,13 +494,23 @@ async function downloadAll(){
     const hover = el.querySelector(".fig-hover");
     if(hover) hover.style.opacity = "0";
 
+    // Swap to base64 for capture
+    const imgEl2 = el.querySelector(".fig-photo img");
+    const origSrc2 = imgEl2 ? imgEl2.src : null;
+    const fid = el.dataset.fotoid;
+    if(imgEl2 && fid && imgCache[photoPrefix + fid.trim()]) {
+      imgEl2.src = imgCache[photoPrefix + fid.trim()];
+    }
     try{
-      const canvas = await html2canvas(el, { scale:4, useCORS:false, allowTaint:true, backgroundColor:null, logging:false });
+      const canvas = await html2canvas(el, { scale:4, useCORS:true, allowTaint:false, backgroundColor:null, logging:false });
       const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
       const filename = nome.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/g,"") + ".png";
       folder.file(filename, blob);
     } catch(e){ console.error("Erro em", nome, e); }
-    finally { if(hover) hover.style.opacity = ""; }
+    finally {
+      if(hover) hover.style.opacity = "";
+      if(imgEl2 && origSrc2) imgEl2.src = origSrc2;
+    }
 
     setStatus("Gerando PNGs... " + (i+1) + "/" + figs.length, Math.round(((i+1)/figs.length)*90)+5);
     await new Promise(r => setTimeout(r, 20));
