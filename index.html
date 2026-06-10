@@ -203,7 +203,7 @@ body{font-family:"Barlow Condensed",sans-serif;background:#0b1a10;color:#fff;min
       <div class="step-num">3</div>
       <div class="step-body">
         <label>Prefixo URL das fotos (Google Drive)</label>
-        <input type="text" class="prefix-input" id="photo-prefix" value="https://drive.google.com/thumbnail?sz=w600&id="/>
+        <input type="text" class="prefix-input" id="photo-prefix" value="https://drive.google.com/uc?export=view&id="/>
         <p>Não alterar — padrão correto para fotos públicas no Drive.</p>
       </div>
     </div>
@@ -243,7 +243,7 @@ const SVG_FLAG = '<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg"><r
 
 let allData = [];
 let csvLoaded = false;
-let photoPrefix = "https://drive.google.com/thumbnail?sz=w600&id=";
+let photoPrefix = "https://drive.google.com/uc?export=view&id=";
 
 function initials(n){ return n.split(" ").slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
 
@@ -361,27 +361,59 @@ function renderGrid(data){
   });
 }
 
+// ── IMAGE CACHE (fetch as blob to bypass CORS) ───────────────────────────────
+const imgCache = {};
+
+async function loadImgAsBase64(url) {
+  if(imgCache[url]) return imgCache[url];
+  try {
+    const resp = await fetch(url);
+    const blob = await resp.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        imgCache[url] = reader.result;
+        resolve(reader.result);
+      };
+      reader.readAsDataURL(blob);
+    });
+  } catch(e) {
+    return null;
+  }
+}
+
 // ── BUILD FIGURINHA ───────────────────────────────────────────────────────────
 function buildFig(p){
   const el = document.createElement("div");
   el.className = "figurinha";
   el.dataset.nome = p.nome;
+  el.dataset.fotoid = p.foto_id || "";
 
-  const imgSrc = (p.foto_id && p.foto_id.trim()) ? photoPrefix + p.foto_id.trim() : "";
-  const photoContent = imgSrc
-    ? '<img src="' + imgSrc + '" alt="' + p.nome + '" />' 
-    : '<div class="fig-initials"><span>' + initials(p.nome) + '</span></div>';
-
+  // Start with initials, load photo async
+  const ini = initials(p.nome);
   el.innerHTML =
     '<div class="fig-bg"></div>' +
     '<div class="fig-year"><span>2</span><span>0</span><span>2</span><span>6</span></div>' +
-    '<div class="fig-photo">' + photoContent + '</div>' +
+    '<div class="fig-photo"><div class="fig-initials"><span>' + ini + '</span></div></div>' +
     '<div class="fig-logo"><img src="' + LOGO_SRC + '" alt="liveSEO" /></div>' +
     '<div class="fig-flag"><div class="fig-flag-circle">' + SVG_FLAG + '</div></div>' +
     '<div class="fig-bra"><span>B</span><span>R</span><span>A</span></div>' +
     '<div class="fig-namepill"><div class="fig-name">' + p.nome + '</div><div class="fig-meta">' + (p.admissao||"") + ' | liveSEO</div></div>' +
     '<div class="fig-bottom"><div class="fig-dept">' + (p.departamento||"") + '</div></div>' +
     '<div class="fig-hover"><span>👆 Baixar</span></div>';
+
+  // Load photo async via fetch blob (bypasses CORS)
+  if(p.foto_id && p.foto_id.trim()) {
+    const url = photoPrefix + p.foto_id.trim();
+    loadImgAsBase64(url).then(b64 => {
+      if(b64) {
+        const photoDiv = el.querySelector(".fig-photo");
+        if(photoDiv) {
+          photoDiv.innerHTML = '<img src="' + b64 + '" alt="' + p.nome + '" />';
+        }
+      }
+    });
+  }
 
   el.onclick = () => downloadOne(el, p.nome);
   return el;
